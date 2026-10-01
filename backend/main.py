@@ -1,6 +1,7 @@
 """API para consultar e ingerir indicadores del SIE de Banxico."""
 
 import os
+import math
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -41,6 +42,28 @@ class IngestResponse(BaseModel):
     series: list[dict[str, Any]]
 
 
+def clean_observations(data: list[dict[str, Any]]) -> pd.DataFrame:
+    """Normaliza observaciones y descarta fechas o valores no analizables."""
+    observations = pd.DataFrame(data).reindex(columns=["fecha", "dato"])
+    observations["fecha"] = pd.to_datetime(
+        observations["fecha"], format="%d/%m/%Y", errors="coerce"
+    )
+    values = observations["dato"].astype("string").str.strip().str.replace(",", "", regex=False)
+    missing_values = {"", "--", "N/E", "N/D", "ND", "S/D", "NA", "N/A", "NULL", "NONE", "NAN"}
+    values = values.mask(values.str.upper().isin(missing_values))
+    observations["valor"] = pd.to_numeric(values, errors="coerce")
+    valid_values = observations["valor"].map(
+        lambda value: pd.notna(value) and math.isfinite(float(value))
+    )
+    observations = observations.loc[observations["fecha"].notna() & valid_values]
+    return (
+        observations.sort_values("fecha", kind="stable")
+        .drop_duplicates(subset=["fecha"], keep="last")
+        .loc[:, ["fecha", "valor"]]
+        .reset_index(drop=True)
+    )
+
+
 def get_database():
     """Abre MongoDB solo cuando una ruta que lo necesita es llamada."""
     mongo_uri = os.getenv("MONGODB_URI")
@@ -59,14 +82,17 @@ def parse_observations(
 ) -> list[dict[str, Any]]:
     """Convierte la respuesta de Banxico al esquema persistido en MongoDB."""
     documents = []
-    previous_value = None
-    for item in series.get("datos", []):
-        try:
-            value = float(item.get("dato", "").replace(",", "").strip())
-            observation_date = datetime.strptime(item["fecha"], "%d/%m/%Y")
-        except (AttributeError, KeyError, TypeError, ValueError):
-            continue
+    try:
+        previous_value = float(previous_value) if previous_value is not None else None
+        if previous_value is not None and not math.isfinite(previous_value):
+            previous_value = None
+    except (TypeError, ValueError):
+        previous_value = None
 
+    observations = clean_observations(series.get("datos", []))
+    for item in observations.itertuples(index=False):
+        value = float(item.valor)
+        observation_date = item.fecha.to_pydatetime()
         variation = 0.0 if previous_value in (None, 0) else round(
             ((value - previous_value) / previous_value) * 100, 4
         )
@@ -144,10 +170,7 @@ def get_series_statistics(
     series_data = fetch_series([series_id], start_date, end_date)
     series = next((item for item in series_data if item.get("idSerie") == series_id), {})
     observations = pd.DataFrame(series.get("datos", []), columns=["fecha", "dato"])
-    observations["fecha"] = pd.to_datetime(observations["fecha"], format="%d/%m/%Y", errors="coerce")
-    values = observations["dato"].astype("string").str.replace(",", "", regex=False).str.strip()
-    observations["valor"] = pd.to_numeric(values, errors="coerce")
-    observations = observations.dropna(subset=["fecha", "valor"])
+    observations = clean_observations(series.get("datos", []))
 
     description = observations["valor"].describe()
     statistics = {
