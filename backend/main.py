@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import requests
+import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel
@@ -125,6 +126,40 @@ def get_series(series_id: str) -> dict[str, Any]:
     if series is None:
         raise HTTPException(status_code=404, detail=f"Serie no encontrada: {series_id}")
     return series
+
+
+@app.get("/estadisticas/{series_id}", tags=["Datos"])
+def get_series_statistics(
+    series_id: str,
+    start_date: date = Query(default=date(2024, 1, 1), description="Fecha inicial inclusiva."),
+    end_date: date = Query(default_factory=date.today, description="Fecha final inclusiva."),
+) -> dict[str, Any]:
+    """Calcula estadísticas descriptivas con los datos consultados a Banxico."""
+    metadata = SERIES_BY_ID.get(series_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail=f"Serie no encontrada: {series_id}")
+    if start_date > end_date:
+        raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+
+    series_data = fetch_series([series_id], start_date, end_date)
+    series = next((item for item in series_data if item.get("idSerie") == series_id), {})
+    observations = pd.DataFrame(series.get("datos", []), columns=["fecha", "dato"])
+    observations["fecha"] = pd.to_datetime(observations["fecha"], format="%d/%m/%Y", errors="coerce")
+    values = observations["dato"].astype("string").str.replace(",", "", regex=False).str.strip()
+    observations["valor"] = pd.to_numeric(values, errors="coerce")
+    observations = observations.dropna(subset=["fecha", "valor"])
+
+    description = observations["valor"].describe()
+    statistics = {
+        name: None if pd.isna(value) else round(float(value), 6)
+        for name, value in description.items()
+    }
+    return {
+        "serie": metadata,
+        "periodo": {"desde": start_date.isoformat(), "hasta": end_date.isoformat()},
+        "total_observaciones": len(observations),
+        "estadisticas": statistics,
+    }
 
 
 @app.get("/observaciones", tags=["Datos"])

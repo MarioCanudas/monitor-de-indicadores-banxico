@@ -30,6 +30,10 @@ Devuelve los metadatos de una serie concreta, por ejemplo `/series/SF43718`. Res
 
 Consulta las observaciones almacenadas en `banxico_monitor.observaciones`, ordenadas de la más reciente a la más antigua. Parámetros opcionales: `series_id` filtra por serie y `limit` limita los resultados entre `1` y `1000` (predeterminado `100`). Responde `503` si MongoDB no está configurado o no está disponible.
 
+## `GET /estadisticas/{series_id}`
+
+Consulta directamente a Banxico la serie indicada y calcula estadísticas descriptivas con pandas sobre las observaciones numéricas válidas. Acepta `start_date` y `end_date` inclusivos, con los mismos valores predeterminados que `/ingestas`. La respuesta incluye metadatos de la serie, el periodo consultado, el total de observaciones y las métricas `count`, `mean`, `std`, `min`, `25%`, `50%`, `75%` y `max` de `pandas.Series.describe()`. Las métricas no calculables se devuelven como `null`. Responde `404` si la serie no está en el catálogo, `422` si el rango no es válido, `502` si Banxico falla y `503` si falta `BANXICO_API`.
+
 ## `POST /ingestas`
 
 Consulta cada serie configurada en el SIE de Banxico de forma incremental. Para cada serie busca en `observaciones` su fecha más reciente y solicita a Banxico únicamente desde el día siguiente hasta `end_date`. Si la serie ya tiene datos hasta esa fecha, no realiza ninguna petición a Banxico para ella. Después transforma fechas y valores, calcula `var_pct` respecto a la observación previa e inserta únicamente los documentos faltantes. El `_id` con formato `serie_id|AAAA-MM-DD` mantiene la ingesta idempotente.
