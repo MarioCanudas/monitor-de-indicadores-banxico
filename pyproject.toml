@@ -12,3 +12,8 @@ dependencies = [
     "requests>=2.34.2",
     "uvicorn[standard]>=0.30.0",
 ]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+]

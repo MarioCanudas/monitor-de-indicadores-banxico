@@ -89,6 +89,27 @@ git commit -m "Describe el nuevo cambio"
 git push
 ```
 
+## Configuración del backend
+
+El backend carga las variables desde `.env` en la raíz del proyecto:
+
+```env
+BANXICO_API=token_de_banxico
+MONGODB_URI=mongodb://...
+MONGODB_DATABASE=banxico_monitor
+MONGODB_TIMEOUT_MS=5000
+DEFAULT_START_DATE=2024-01-01
+MAX_PAGE_SIZE=1000
+```
+
+No se deben incluir valores reales en el repositorio. Para iniciar la API:
+
+```bash
+uv run uvicorn backend.main:app --reload
+```
+
+La documentación interactiva queda disponible en `/docs`. Las consultas de observaciones aceptan filtros por serie, fechas y paginación; las estadísticas aceptan agrupaciones por año, mes y año-mes; el historial de ejecuciones está disponible en `GET /ingestas/historial`.
+
 ### Flujo completo de ejemplo
 
 ```bash

@@ -1,136 +1,78 @@
 """API para consultar e ingerir indicadores del SIE de Banxico."""
 
-import os
-import math
 import time
-from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, time as datetime_time, timedelta
+from typing import Annotated, Any, Literal, cast
 
-import requests
-import pandas as pd
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, status
-from pydantic import BaseModel
-from pymongo import MongoClient
-from pymongo.errors import BulkWriteError, PyMongoError
 
-load_dotenv()
+from .banxico_client import (
+    SERIES_BY_ID,
+    SERIES_METADATA,
+    clean_observations,
+    fetch_series,
+    parse_observations,
+)
+from .config import get_settings
+from .exceptions import BanxicoError, ConfigurationError, MongoDBError
+from .mongodb_client import (
+    close_database,
+    get_database,
+    list_ingestion_logs,
+    list_observations as query_observations,
+    insert_observations,
+    save_ingestion_log,
+    seed_catalogo,
+    update_catalogo_latest,
+    get_latest_observation,
+)
+from .schemas import (
+    GroupedStatistics,
+    IngestResponse,
+    IngestionLog,
+    IngestionLogPage,
+    Observation,
+    ObservationPage,
+    Pagination,
+    SeriesMetadata,
+    StatisticsResponse,
+    DatePeriod,
+)
+from .statistics import compute_grouped_statistics, compute_statistics
 
-SERIES_METADATA = [
-    {"_id": "SF43718", "titulo": "Pesos por dólar, FIX", "unidad": "Pesos", "frecuencia": "Diaria", "paquetes": ["mercados"], "activa": True},
-    {"_id": "SF46410", "titulo": "Euro", "unidad": "Pesos", "frecuencia": "Diaria", "paquetes": ["mercados"], "activa": True},
-    {"_id": "SF46406", "titulo": "Yen japonés", "unidad": "Pesos", "frecuencia": "Diaria", "paquetes": ["mercados"], "activa": True},
-    {"_id": "SF46407", "titulo": "Libra esterlina", "unidad": "Pesos", "frecuencia": "Diaria", "paquetes": ["mercados"], "activa": True},
-    {"_id": "SF60632", "titulo": "Dólar canadiense", "unidad": "Pesos", "frecuencia": "Diaria", "paquetes": ["mercados"], "activa": True},
-    {"_id": "SF60648", "titulo": "TIIE a 28 días", "unidad": "Porcentaje", "frecuencia": "Diaria", "paquetes": ["mercados"], "activa": True},
-]
-SERIES_BY_ID = {series["_id"]: series for series in SERIES_METADATA}
+
+settings = get_settings()
+DEFAULT_END_DATE = settings.today
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    close_database()
+
 
 app = FastAPI(
     title="Monitor de indicadores Banxico",
     description="API para consultar el catálogo e ingerir series del SIE de Banxico.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
-class IngestResponse(BaseModel):
-    run_id: str
-    nuevos: int
-    duplicados: int
-    errores: int
-    duracion_seg: float
-    series: list[dict[str, Any]]
+def _service_error(error: Exception) -> HTTPException:
+    if isinstance(error, BanxicoError):
+        return HTTPException(status_code=502, detail=str(error))
+    if isinstance(error, (ConfigurationError, MongoDBError)):
+        return HTTPException(status_code=503, detail=str(error))
+    return HTTPException(status_code=500, detail="Error interno del servicio.")
 
 
-def clean_observations(data: list[dict[str, Any]]) -> pd.DataFrame:
-    """Normaliza observaciones y descarta fechas o valores no analizables."""
-    observations = pd.DataFrame(data).reindex(columns=["fecha", "dato"])
-    observations["fecha"] = pd.to_datetime(
-        observations["fecha"], format="%d/%m/%Y", errors="coerce"
-    )
-    values = observations["dato"].astype("string").str.strip().str.replace(",", "", regex=False)
-    missing_values = {"", "--", "N/E", "N/D", "ND", "S/D", "NA", "N/A", "NULL", "NONE", "NAN"}
-    values = values.mask(values.str.upper().isin(missing_values))
-    observations["valor"] = pd.to_numeric(values, errors="coerce")
-    valid_values = observations["valor"].map(
-        lambda value: pd.notna(value) and math.isfinite(float(value))
-    )
-    observations = observations.loc[observations["fecha"].notna() & valid_values]
+def _date_bounds(start_date: date | None, end_date: date | None) -> tuple[datetime | None, datetime | None]:
     return (
-        observations.sort_values("fecha", kind="stable")
-        .drop_duplicates(subset=["fecha"], keep="last")
-        .loc[:, ["fecha", "valor"]]
-        .reset_index(drop=True)
+        datetime.combine(start_date, datetime_time.min) if start_date else None,
+        datetime.combine(end_date, datetime_time.max) if end_date else None,
     )
-
-
-def get_database():
-    """Abre MongoDB solo cuando una ruta que lo necesita es llamada."""
-    mongo_uri = os.getenv("MONGODB_URI")
-    if not mongo_uri:
-        raise HTTPException(status_code=503, detail="MONGODB_URI no está configurada.")
-    try:
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-        client.admin.command("ping")
-        return client["banxico_monitor"]
-    except PyMongoError as error:
-        raise HTTPException(status_code=503, detail=f"No fue posible conectar con MongoDB: {error}") from error
-
-
-def parse_observations(
-    series: dict[str, Any], run_id: str, previous_value: float | None = None
-) -> list[dict[str, Any]]:
-    """Convierte la respuesta de Banxico al esquema persistido en MongoDB."""
-    documents = []
-    try:
-        previous_value = float(previous_value) if previous_value is not None else None
-        if previous_value is not None and not math.isfinite(previous_value):
-            previous_value = None
-    except (TypeError, ValueError):
-        previous_value = None
-
-    observations = clean_observations(series.get("datos", []))
-    for item in observations.itertuples(index=False):
-        value = float(item.valor)
-        observation_date = item.fecha.to_pydatetime()
-        variation = 0.0 if previous_value in (None, 0) else round(
-            ((value - previous_value) / previous_value) * 100, 4
-        )
-        previous_value = value
-        date_key = observation_date.strftime("%Y-%m-%d")
-        documents.append({
-            "_id": f"{series.get('idSerie')}|{date_key}",
-            "serie_id": series.get("idSerie"),
-            "fecha": observation_date,
-            "anio": observation_date.year,
-            "mes": observation_date.month,
-            "valor": value,
-            "var_pct": variation,
-            "run_id": run_id,
-        })
-    return documents
-
-
-def fetch_series(
-    series_ids: list[str], start_date: date, end_date: date
-) -> list[dict[str, Any]]:
-    token = os.getenv("BANXICO_API")
-    if not token:
-        raise HTTPException(status_code=503, detail="BANXICO_API no está configurada.")
-    if start_date > end_date:
-        return []
-
-    requested_series = ",".join(series_ids)
-    url = (
-        "https://www.banxico.org.mx/SieAPIRest/service/v1/series/"
-        f"{requested_series}/datos/{start_date:%Y-%m-%d}/{end_date:%Y-%m-%d}"
-    )
-    try:
-        response = requests.get(url, headers={"Bmx-Token": token}, timeout=20)
-        response.raise_for_status()
-        return response.json().get("bmx", {}).get("series", [])
-    except (requests.RequestException, ValueError) as error:
-        raise HTTPException(status_code=502, detail=f"Error al consultar Banxico: {error}") from error
 
 
 @app.get("/health", tags=["Sistema"])
@@ -139,27 +81,28 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/series", tags=["Catálogo"])
-def list_series() -> list[dict[str, Any]]:
+@app.get("/series", response_model=list[SeriesMetadata], tags=["Catálogo"])
+def list_series() -> list[SeriesMetadata]:
     """Devuelve las series configuradas para el paquete mercados."""
-    return SERIES_METADATA
+    return [SeriesMetadata.model_validate(series) for series in SERIES_METADATA]
 
 
-@app.get("/series/{series_id}", tags=["Catálogo"])
-def get_series(series_id: str) -> dict[str, Any]:
+@app.get("/series/{series_id}", response_model=SeriesMetadata, tags=["Catálogo"])
+def get_series(series_id: str) -> SeriesMetadata:
     """Devuelve los metadatos de una serie por su identificador Banxico."""
     series = SERIES_BY_ID.get(series_id)
     if series is None:
         raise HTTPException(status_code=404, detail=f"Serie no encontrada: {series_id}")
-    return series
+    return SeriesMetadata.model_validate(series)
 
 
-@app.get("/estadisticas/{series_id}", tags=["Datos"])
+@app.get("/estadisticas/{series_id}", response_model=StatisticsResponse, tags=["Datos"])
 def get_series_statistics(
     series_id: str,
-    start_date: date = Query(default=date(2024, 1, 1), description="Fecha inicial inclusiva."),
-    end_date: date = Query(default_factory=date.today, description="Fecha final inclusiva."),
-) -> dict[str, Any]:
+    start_date: Annotated[date, Query(description="Fecha inicial inclusiva.")] = settings.default_start_date,
+    end_date: Annotated[date, Query(description="Fecha final inclusiva.")] = DEFAULT_END_DATE,
+    agrupacion: Annotated[Literal["none", "year", "month", "year_month"], Query()] = "none",
+) -> StatisticsResponse:
     """Calcula estadísticas descriptivas con los datos consultados a Banxico."""
     metadata = SERIES_BY_ID.get(series_id)
     if metadata is None:
@@ -167,59 +110,111 @@ def get_series_statistics(
     if start_date > end_date:
         raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
 
-    series_data = fetch_series([series_id], start_date, end_date)
-    series = next((item for item in series_data if item.get("idSerie") == series_id), {})
-    observations = pd.DataFrame(series.get("datos", []), columns=["fecha", "dato"])
+    try:
+        series_data = fetch_series([series_id], start_date, end_date)
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+    series = cast(
+        dict[str, Any],
+        next((item for item in series_data if item.get("idSerie") == series_id), {}),
+    )
     observations = clean_observations(series.get("datos", []))
 
-    description = observations["valor"].describe()
-    statistics = {
-        name: None if pd.isna(value) else round(float(value), 6)
-        for name, value in description.items()
-    }
-    return {
-        "serie": metadata,
-        "periodo": {"desde": start_date.isoformat(), "hasta": end_date.isoformat()},
-        "total_observaciones": len(observations),
-        "estadisticas": statistics,
-    }
+    statistics = compute_statistics(observations)
+    return StatisticsResponse(
+        serie=SeriesMetadata.model_validate(metadata),
+        periodo=DatePeriod(desde=start_date, hasta=end_date),
+        total_observaciones=len(observations),
+        estadisticas=statistics,
+        agrupacion=None if agrupacion == "none" else agrupacion,
+        grupos=[] if agrupacion == "none" else [
+            GroupedStatistics.model_validate(item)
+            for item in compute_grouped_statistics(observations, agrupacion)
+        ],
+    )
 
 
-@app.get("/observaciones", tags=["Datos"])
+@app.get("/observaciones", response_model=ObservationPage, tags=["Datos"])
 def list_observations(
-    series_id: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=1000),
-) -> list[dict[str, Any]]:
+    series_id: Annotated[str | None, Query()] = None,
+    start_date: Annotated[date | None, Query()] = None,
+    end_date: Annotated[date | None, Query()] = None,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=settings.max_page_size)] = 100,
+) -> ObservationPage:
     """Consulta observaciones persistidas, opcionalmente filtradas por serie."""
     if series_id and series_id not in SERIES_BY_ID:
         raise HTTPException(status_code=404, detail=f"Serie no encontrada: {series_id}")
-    database = get_database()
-    query = {"serie_id": series_id} if series_id else {}
-    observations = database.observaciones.find(query, {"_id": 0}).sort("fecha", -1).limit(limit)
-    return list(observations)
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+    try:
+        database = get_database()
+        start_datetime, end_datetime = _date_bounds(start_date, end_date)
+        observations, total = query_observations(
+            database, series_id, start_datetime, end_datetime, skip, limit
+        )
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+    return ObservationPage(
+        items=[Observation.model_validate(observation) for observation in observations],
+        pagination=Pagination(total=total, skip=skip, limit=limit, has_more=skip + len(observations) < total),
+    )
+
+
+@app.get("/ingestas/historial", response_model=IngestionLogPage, tags=["Ingesta"])
+def list_ingestion_history(
+    run_id: Annotated[str | None, Query()] = None,
+    start_date: Annotated[date | None, Query()] = None,
+    end_date: Annotated[date | None, Query()] = None,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=settings.max_page_size)] = 100,
+) -> IngestionLogPage:
+    """Consulta ejecuciones de ingesta almacenadas en MongoDB."""
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+    try:
+        database = get_database()
+        start_datetime, end_datetime = _date_bounds(start_date, end_date)
+        logs, total = list_ingestion_logs(
+            database, run_id, start_datetime, end_datetime, skip, limit
+        )
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+    return IngestionLogPage(
+        items=[IngestionLog.model_validate(log) for log in logs],
+        pagination=Pagination(total=total, skip=skip, limit=limit, has_more=skip + len(logs) < total),
+    )
 
 
 @app.post("/ingestas", response_model=IngestResponse, status_code=status.HTTP_201_CREATED, tags=["Ingesta"])
 def create_ingestion(
-    start_date: date = Query(default=date(2024, 1, 1), description="Fecha inicial inclusiva."),
-    end_date: date = Query(default_factory=date.today, description="Fecha final inclusiva."),
+    start_date: Annotated[date, Query(description="Fecha inicial inclusiva.")] = settings.default_start_date,
+    end_date: Annotated[date, Query(description="Fecha final inclusiva.")] = DEFAULT_END_DATE,
 ) -> IngestResponse:
     """Descarga las series de Banxico y las inserta de forma idempotente en MongoDB."""
+    if start_date > end_date:
+        raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+
     started_at = time.time()
-    run_id = datetime.now(timezone.utc).isoformat()
-    database = get_database()
-    for metadata in SERIES_METADATA:
-        database.series_catalogo.update_one({"_id": metadata["_id"]}, {"$setOnInsert": metadata}, upsert=True)
+    run_id = datetime.now(UTC).isoformat()
+    try:
+        database = get_database()
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+
+    try:
+        seed_catalogo(database)
+    except MongoDBError as error:
+        raise _service_error(error) from error
 
     total_new = total_duplicates = total_errors = 0
-    series_log = []
+    series_log: list[dict[str, Any]] = []
     for metadata in SERIES_METADATA:
-        series_id = metadata["_id"]
-        latest = database.observaciones.find_one(
-            {"serie_id": series_id},
-            {"fecha": 1, "valor": 1, "_id": 0},
-            sort=[("fecha", -1)],
-        )
+        series_id = str(metadata["_id"])
+        try:
+            latest = get_latest_observation(database, series_id)
+        except MongoDBError as error:
+            raise _service_error(error) from error
         next_date = start_date
         if latest and isinstance(latest.get("fecha"), datetime):
             next_date = max(next_date, latest["fecha"].date() + timedelta(days=1))
@@ -234,24 +229,33 @@ def create_ingestion(
             })
             continue
 
-        series_data = fetch_series([series_id], next_date, end_date)
-        series = next((item for item in series_data if item.get("idSerie") == series_id), {})
+        try:
+            series_data = fetch_series([series_id], next_date, end_date)
+        except ConfigurationError as error:
+            raise _service_error(error) from error
+        except BanxicoError as error:
+            total_errors += 1
+            series_log.append({
+                "serie_id": series_id,
+                "nuevos": 0,
+                "duplicados": 0,
+                "consultada": True,
+                "error": str(error),
+            })
+            continue
+        series = cast(
+            dict[str, Any],
+            next((item for item in series_data if item.get("idSerie") == series_id), {}),
+        )
         previous_value = latest.get("valor") if latest else None
         documents = parse_observations(series, run_id, previous_value)
         new_count = duplicate_count = 0
         if documents:
             try:
-                result = database.observaciones.insert_many(documents, ordered=False)
-                new_count = len(result.inserted_ids)
-            except BulkWriteError as error:
-                new_count = error.details.get("nInserted", 0)
-                duplicate_count = len(error.details.get("writeErrors", []))
-            except PyMongoError:
-                total_errors += 1
-            database.series_catalogo.update_one(
-                {"_id": series_id},
-                {"$set": {"ultima_fecha": max(document["fecha"] for document in documents), "activa": True}},
-            )
+                new_count, duplicate_count = insert_observations(database, documents)
+                update_catalogo_latest(database, series_id, documents)
+            except MongoDBError as error:
+                raise _service_error(error) from error
         total_new += new_count
         total_duplicates += duplicate_count
         series_log.append({
@@ -264,9 +268,13 @@ def create_ingestion(
         })
 
     duration = round(time.time() - started_at, 2)
-    database.ingesta_log.insert_one({
-        "run_id": run_id,
-        "resumen": {"nuevos": total_new, "duplicados": total_duplicates, "errores": total_errors, "duracion_seg": duration},
-        "series": series_log,
-    })
+    try:
+        save_ingestion_log(database, run_id, {
+            "nuevos": total_new,
+            "duplicados": total_duplicates,
+            "errores": total_errors,
+            "duracion_seg": duration,
+        }, series_log)
+    except MongoDBError as error:
+        raise _service_error(error) from error
     return IngestResponse(run_id=run_id, nuevos=total_new, duplicados=total_duplicates, errores=total_errors, duracion_seg=duration, series=series_log)
