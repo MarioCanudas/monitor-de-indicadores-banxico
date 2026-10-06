@@ -91,18 +91,60 @@ git push
 
 ## Configuración del backend
 
-El backend carga las variables desde `.env` en la raíz del proyecto:
+El backend carga las variables desde `.env` en la raíz del proyecto. La
+configuración recomendada puede mantenerse con este conjunto de variables.
+No incluyas valores reales en Git ni en la documentación:
 
 ```env
-BANXICO_API=token_de_banxico
-MONGODB_URI=mongodb://...
+# MongoDB
+MONGODB_USERNAME=usuario
+MONGODB_PASSWORD=contraseña
+MONGODB_URI=mongodb+srv://usuario:contraseña@cluster.mongodb.net/?retryWrites=true&w=majority
 MONGODB_DATABASE=banxico_monitor
-MONGODB_TIMEOUT_MS=5000
-DEFAULT_START_DATE=2024-01-01
-MAX_PAGE_SIZE=1000
+
+# Gmail
+GMAIL_USER=cuenta@gmail.com
+GMAIL_KEY=contraseña_de_aplicación_de_gmail
+
+# Proveedor de resumen narrativo
+LLM_PROVIDER=azure
+AZURE_OPENAI_API_KEY=clave_de_azure_openai
+AZURE_OPENAI_ENDPOINT=https://recurso.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT=nombre_del_deployment
+
+# Banxico
+BANXICO_API=token_de_banxico
 ```
 
-No se deben incluir valores reales en el repositorio. Para iniciar la API:
+### Variables y valores esperados
+
+| Variable | Requerida | Formato y uso | Valor predeterminado |
+| --- | --- | --- | --- |
+| `MONGODB_USERNAME` | No | Usuario de MongoDB. Actualmente el backend no la lee; puede conservarse como dato auxiliar para construir `MONGODB_URI` fuera de la aplicación. | Sin valor |
+| `MONGODB_PASSWORD` | No | Contraseña de MongoDB. Actualmente el backend no la lee; debe quedar incluida o referenciada correctamente en `MONGODB_URI`. | Sin valor |
+| `MONGODB_URI` | Sí para observaciones, ingestas, snapshots e historial | URI completa y válida de conexión a MongoDB, por ejemplo `mongodb://...` o `mongodb+srv://...`. | Sin valor; la operación falla si falta |
+| `MONGODB_DATABASE` | No | Nombre de la base de datos donde se guardan `observaciones`, `series_catalogo`, `ingesta_log` y `snapshots`. | `banxico_monitor` |
+| `GMAIL_USER` | Solo para enviar reportes | Dirección de la cuenta Gmail que autentica el SMTP. | Sin valor |
+| `GMAIL_KEY` | Solo para enviar reportes | Contraseña de aplicación de Gmail, no la contraseña normal de la cuenta. Se usa con SMTP SSL en `smtp.gmail.com:465`. | Sin valor |
+| `LLM_PROVIDER` | No | Proveedor elegido por el proyecto. Actualmente el backend no la lee; la integración se determina por la configuración de Azure OpenAI. | Sin valor |
+| `AZURE_OPENAI_API_KEY` | Solo para usar Azure OpenAI | Clave de autenticación del recurso o proyecto de Azure OpenAI. Si falta junto con el endpoint, el snapshot usa el resumen determinista de respaldo. | Sin valor |
+| `AZURE_OPENAI_ENDPOINT` | Solo para usar Azure OpenAI | URL base del recurso o proyecto de Azure OpenAI. Los endpoints de proyectos `*.services.ai.azure.com/api/projects/...` se conectan mediante la API compatible de OpenAI. | Sin valor |
+| `AZURE_OPENAI_DEPLOYMENT` | No | Nombre del deployment/modelo que se envía en `model` al generar el resumen. | `gpt-4.1-mini-ejercicio-openai` |
+| `BANXICO_API` | Sí para ingestas y estadísticas | Token de acceso al SIE de Banxico. Se envía en el encabezado `Bmx-Token`. | Sin valor; la operación falla si falta |
+
+`BANXICO_API` y `MONGODB_URI` son necesarias únicamente cuando se ejecutan
+rutas que acceden a esos servicios; por ejemplo, `/health` y `/series` no
+requieren credenciales. Azure OpenAI es opcional: si no se configura o el
+servicio falla, se genera un resumen determinista. Gmail solo se necesita
+cuando `POST /reportes/enviar` recibe `dry_run=false`; la vista previa no
+abre una conexión SMTP.
+
+La conexión usa la URI completa de `MONGODB_URI`; por eso
+`MONGODB_USERNAME` y `MONGODB_PASSWORD` no se combinan automáticamente con
+ella. `LLM_PROVIDER` también se conserva por compatibilidad, pero no modifica
+el comportamiento actual.
+
+Para iniciar la API:
 
 ```bash
 uv run uvicorn backend.main:app --reload
