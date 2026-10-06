@@ -1,7 +1,7 @@
 """Modelos publicos de entrada y salida de la API."""
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -93,3 +93,74 @@ class IngestionLog(BaseModel):
 class IngestionLogPage(BaseModel):
     items: list[IngestionLog]
     pagination: Pagination
+
+
+class ExecutiveSummary(BaseModel):
+    resumen: str
+    puntos_clave: list[str] = Field(default_factory=list)
+    alertas: list[str] = Field(default_factory=list)
+    limitaciones: list[str] = Field(default_factory=list)
+
+
+class NarrativeIndicator(BaseModel):
+    nombre: str
+    unidad: str
+    tendencia: Literal["ascendente", "descendente", "estable"]
+    balance: Literal["al_alza", "a_la_baja", "mixto", "estable"]
+    cobertura_pct: float
+    tiene_alerta: bool
+
+
+class NarrativeInput(BaseModel):
+    periodo: str
+    es_un_dia: bool
+    indicadores: list[NarrativeIndicator]
+    alertas_totales: int
+
+
+class NarrativeOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resumen: str = Field(min_length=20, max_length=1200)
+
+
+class Alert(BaseModel):
+    tipo: str
+    severidad: Literal["media", "alta"]
+    serie_id: str
+    mensaje: str
+    valor: float
+    var_pct: float
+
+
+class Snapshot(BaseModel):
+    id: str = Field(alias="_id")
+    creado_en: datetime
+    desde: date
+    hasta: date
+    series: list[dict[str, Any]]
+    alertas: list[Alert]
+    estado: Literal["ok", "con_alertas"]
+    analisis: "ExecutiveSummary | None" = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SnapshotPage(BaseModel):
+    items: list[Snapshot]
+    pagination: Pagination
+
+
+class ReportRequest(BaseModel):
+    destinatario: str
+    start_date: date
+    end_date: date
+    dry_run: bool = True
+
+
+class ReportResponse(BaseModel):
+    destinatario: str
+    dry_run: bool
+    asunto: str
+    html: str
+    snapshot_id: str

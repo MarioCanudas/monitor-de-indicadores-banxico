@@ -20,6 +20,39 @@ SERIES_METADATA = [
 ]
 SERIES_BY_ID = {series["_id"]: series for series in SERIES_METADATA}
 
+INDICATOR_CONTEXT = {
+    "SF43718": {
+        "que_es": "Tipo de cambio FIX del dólar estadounidense frente al peso mexicano.",
+        "representa": "Cuántos pesos se necesitan para comprar un dólar.",
+        "interpretacion": "Un valor más alto suele indicar un peso más débil; uno más bajo, un peso más fuerte.",
+    },
+    "SF46410": {
+        "que_es": "Tipo de cambio del euro frente al peso mexicano.",
+        "representa": "Cuántos pesos se necesitan para comprar un euro.",
+        "interpretacion": "Un valor más alto indica que el euro se encarece frente al peso; uno más bajo, que se abarata.",
+    },
+    "SF46406": {
+        "que_es": "Tipo de cambio del yen japonés frente al peso mexicano.",
+        "representa": "El valor en pesos de una unidad de yen.",
+        "interpretacion": "Un valor más alto significa que el yen gana valor frente al peso; uno más bajo, que pierde valor.",
+    },
+    "SF46407": {
+        "que_es": "Tipo de cambio de la libra esterlina frente al peso mexicano.",
+        "representa": "Cuántos pesos se necesitan para comprar una libra.",
+        "interpretacion": "Un valor más alto indica una libra más cara frente al peso; uno más bajo, una libra más barata.",
+    },
+    "SF60632": {
+        "que_es": "Tipo de cambio del dólar canadiense frente al peso mexicano.",
+        "representa": "Cuántos pesos se necesitan para comprar un dólar canadiense.",
+        "interpretacion": "Un valor más alto indica un dólar canadiense más caro frente al peso; uno más bajo, más barato.",
+    },
+    "SF60648": {
+        "que_es": "Tasa de interés interbancaria de equilibrio (TIIE) a 28 días.",
+        "representa": "Una referencia del costo anualizado de financiarse en el mercado interbancario.",
+        "interpretacion": "Un porcentaje más alto implica financiamiento más caro; uno más bajo, condiciones de crédito relativamente menos costosas.",
+    },
+}
+
 
 def clean_observations(data: list[dict[str, Any]]) -> pd.DataFrame:
     """Normaliza observaciones y descarta fechas o valores no analizables."""

@@ -14,18 +14,25 @@ from .banxico_client import (
     fetch_series,
     parse_observations,
 )
+from .analytics import build_snapshot
 from .config import get_settings
-from .exceptions import BanxicoError, ConfigurationError, MongoDBError
+from .exceptions import BackendError, BanxicoError, ConfigurationError, MongoDBError
+from .llm_client import generate_executive_summary
 from .mongodb_client import (
     close_database,
     get_database,
     list_ingestion_logs,
+    list_all_observations,
     list_observations as query_observations,
     insert_observations,
     save_ingestion_log,
     seed_catalogo,
     update_catalogo_latest,
     get_latest_observation,
+    get_earliest_observation,
+    get_snapshot,
+    list_snapshots,
+    save_snapshot,
 )
 from .schemas import (
     GroupedStatistics,
@@ -38,7 +45,12 @@ from .schemas import (
     SeriesMetadata,
     StatisticsResponse,
     DatePeriod,
+    Snapshot,
+    SnapshotPage,
+    ReportRequest,
+    ReportResponse,
 )
+from .reports import render_report, send_report, validate_recipient
 from .statistics import compute_grouped_statistics, compute_statistics
 
 
@@ -213,13 +225,18 @@ def create_ingestion(
         series_id = str(metadata["_id"])
         try:
             latest = get_latest_observation(database, series_id)
+            earliest = get_earliest_observation(database, series_id)
         except MongoDBError as error:
             raise _service_error(error) from error
-        next_date = start_date
-        if latest and isinstance(latest.get("fecha"), datetime):
-            next_date = max(next_date, latest["fecha"].date() + timedelta(days=1))
-
-        if next_date > end_date:
+        fetch_start: date | None = start_date
+        fetch_end: date | None = end_date
+        previous_value = None
+        if earliest and isinstance(earliest.get("fecha"), datetime):
+            if start_date < earliest["fecha"].date():
+                fetch_end = min(end_date, earliest["fecha"].date() - timedelta(days=1))
+            else:
+                fetch_start = None
+        if fetch_start is None or fetch_end is None or fetch_start > fetch_end:
             series_log.append({
                 "serie_id": series_id,
                 "nuevos": 0,
@@ -230,7 +247,7 @@ def create_ingestion(
             continue
 
         try:
-            series_data = fetch_series([series_id], next_date, end_date)
+            series_data = fetch_series([series_id], fetch_start, fetch_end)
         except ConfigurationError as error:
             raise _service_error(error) from error
         except BanxicoError as error:
@@ -247,7 +264,6 @@ def create_ingestion(
             dict[str, Any],
             next((item for item in series_data if item.get("idSerie") == series_id), {}),
         )
-        previous_value = latest.get("valor") if latest else None
         documents = parse_observations(series, run_id, previous_value)
         new_count = duplicate_count = 0
         if documents:
@@ -263,8 +279,8 @@ def create_ingestion(
             "nuevos": new_count,
             "duplicados": duplicate_count,
             "consultada": True,
-            "desde": next_date.isoformat(),
-            "hasta": end_date.isoformat(),
+            "desde": fetch_start.isoformat(),
+            "hasta": fetch_end.isoformat(),
         })
 
     duration = round(time.time() - started_at, 2)
@@ -278,3 +294,141 @@ def create_ingestion(
     except MongoDBError as error:
         raise _service_error(error) from error
     return IngestResponse(run_id=run_id, nuevos=total_new, duplicados=total_duplicates, errores=total_errors, duracion_seg=duration, series=series_log)
+
+
+@app.post("/snapshots", response_model=Snapshot, status_code=status.HTTP_201_CREATED, tags=["Snapshots"])
+def create_snapshot(
+    start_date: Annotated[date, Query()] = settings.default_start_date,
+    end_date: Annotated[date, Query()] = DEFAULT_END_DATE,
+) -> Snapshot:
+    """Calcula y persiste un snapshot a partir de observaciones almacenadas."""
+    if start_date > end_date:
+        raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+    try:
+        database = get_database()
+        start_datetime, end_datetime = _date_bounds(start_date, end_date)
+        observations = list_all_observations(database, start_datetime, end_datetime)
+        snapshot = build_snapshot(observations, start_date, end_date, settings)
+        snapshot["analisis"] = generate_executive_summary(snapshot, settings).model_dump()
+        save_snapshot(database, snapshot)
+        return Snapshot.model_validate(snapshot)
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+
+
+@app.post(
+        "/snapshots/diario",
+        response_model=Snapshot,
+        status_code=status.HTTP_201_CREATED,
+        tags=["Snapshots"],
+)
+def create_daily_snapshot(
+    start_date: Annotated[date, Query(description="Fecha inicial inclusiva.")],
+    end_date: Annotated[date, Query(description="Fecha final inclusiva.")],
+) -> Snapshot:
+    """Genera un snapshot para un día o periodo indicado."""
+    return create_snapshot(start_date, end_date)
+
+
+@app.post(
+    "/tareas/diaria",
+    response_model=Snapshot,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Sistema"],
+)
+def run_daily_task(
+    start_date: Annotated[date, Query(description="Fecha inicial inclusiva.")],
+    end_date: Annotated[date, Query(description="Fecha final inclusiva.")],
+) -> Snapshot:
+    """Ejecuta la ingesta y genera el snapshot del periodo indicado."""
+    _ = create_ingestion(start_date, end_date)
+    return create_daily_snapshot(start_date, end_date)
+
+
+@app.get("/snapshots", response_model=SnapshotPage, tags=["Snapshots"])
+def get_snapshots(
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=settings.max_page_size)] = 100,
+) -> SnapshotPage:
+    """Lista snapshots calculados, del más reciente al más antiguo."""
+    try:
+        database = get_database()
+        snapshots, total = list_snapshots(database, skip, limit)
+        return SnapshotPage(
+            items=[Snapshot.model_validate(item) for item in snapshots],
+            pagination=Pagination(
+                total=total,
+                skip=skip,
+                limit=limit,
+                has_more=skip + len(snapshots) < total,
+            ),
+        )
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+
+
+@app.get("/snapshots/{snapshot_id}", response_model=Snapshot, tags=["Snapshots"])
+def read_snapshot(snapshot_id: str) -> Snapshot:
+    """Devuelve un snapshot por su periodo determinista."""
+    try:
+        snapshot = get_snapshot(get_database(), snapshot_id)
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"Snapshot no encontrado: {snapshot_id}")
+    return Snapshot.model_validate(snapshot)
+
+
+@app.post("/reportes/preview", response_model=ReportResponse, tags=["Reportes"])
+def preview_report(request: ReportRequest) -> ReportResponse:
+    """Genera el HTML del reporte del periodo sin realizar ningún envío."""
+    try:
+        if request.start_date > request.end_date:
+            raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+        recipient = validate_recipient(request.destinatario)
+        database = get_database()
+        snapshot = get_snapshot(
+            database, f"{request.start_date.isoformat()}|{request.end_date.isoformat()}"
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="No existe snapshot para el periodo solicitado.")
+        subject, body = render_report(snapshot)
+        return ReportResponse(
+            destinatario=recipient,
+            dry_run=True,
+            asunto=subject,
+            html=body,
+            snapshot_id=snapshot["_id"],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+
+
+@app.post("/reportes/enviar", response_model=ReportResponse, tags=["Reportes"])
+def send_email_report(request: ReportRequest) -> ReportResponse:
+    """Genera el reporte del periodo y lo envía solo cuando dry_run es falso."""
+    try:
+        if request.start_date > request.end_date:
+            raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+        recipient = validate_recipient(request.destinatario)
+        database = get_database()
+        snapshot = get_snapshot(
+            database, f"{request.start_date.isoformat()}|{request.end_date.isoformat()}"
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="No existe snapshot para el periodo solicitado.")
+        subject, body = render_report(snapshot)
+        send_report(recipient, subject, body, settings, request.dry_run)
+        return ReportResponse(
+            destinatario=recipient,
+            dry_run=request.dry_run,
+            asunto=subject,
+            html=body,
+            snapshot_id=snapshot["_id"],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (BanxicoError, ConfigurationError, MongoDBError, BackendError) as error:
+        raise _service_error(error) from error

@@ -52,8 +52,45 @@ def ensure_indexes(database: Any) -> None:
         database.observaciones.create_index([("fecha", -1)])
         database.ingesta_log.create_index([("run_id", 1)], unique=True)
         database.ingesta_log.create_index([("creado_en", -1)])
+        snapshots = getattr(database, "snapshots", None)
+        if snapshots is not None:
+            snapshots.create_index([("desde", -1), ("hasta", -1)])
     except PyMongoError as error:
         raise MongoDBError(f"No fue posible crear indices en MongoDB: {error}") from error
+
+
+def save_snapshot(database: Any, snapshot: dict[str, Any]) -> None:
+    """Guarda o reemplaza un snapshot por su identificador determinista."""
+    try:
+        database.snapshots.replace_one(
+            {"_id": snapshot["_id"]},
+            snapshot,
+            upsert=True,
+        )
+    except PyMongoError as error:
+        raise MongoDBError(f"No fue posible guardar el snapshot: {error}") from error
+
+
+def get_snapshot(database: Any, snapshot_id: str) -> dict[str, Any] | None:
+    try:
+        return database.snapshots.find_one({"_id": snapshot_id})
+    except PyMongoError as error:
+        raise MongoDBError(f"No fue posible consultar el snapshot: {error}") from error
+
+
+def list_snapshots(
+    database: Any,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[dict[str, Any]], int]:
+    try:
+        total = database.snapshots.count_documents({})
+        snapshots = database.snapshots.find({}).sort(
+            [("hasta", -1), ("_id", -1)]
+        ).skip(skip).limit(limit)
+        return list(snapshots), total
+    except PyMongoError as error:
+        raise MongoDBError(f"No fue posible listar snapshots: {error}") from error
 
 
 def seed_catalogo(database: Any) -> None:
@@ -126,6 +163,18 @@ def get_latest_observation(database: Any, series_id: str) -> dict[str, Any] | No
         raise MongoDBError(f"No fue posible consultar observaciones: {error}") from error
 
 
+def get_earliest_observation(database: Any, series_id: str) -> dict[str, Any] | None:
+    """Obtiene la primera observacion persistida de una serie."""
+    try:
+        return database.observaciones.find_one(
+            {"serie_id": series_id},
+            {"fecha": 1, "valor": 1, "_id": 0},
+            sort=[("fecha", 1)],
+        )
+    except PyMongoError as error:
+        raise MongoDBError(f"No fue posible consultar observaciones: {error}") from error
+
+
 def list_observations(
     database: Any,
     series_id: str | None = None,
@@ -152,6 +201,21 @@ def list_observations(
         return list(observations), total
     except PyMongoError as error:
         raise MongoDBError(f"No fue posible consultar observaciones: {error}") from error
+
+
+def list_all_observations(
+    database: Any,
+    start_date: datetime,
+    end_date: datetime,
+) -> list[dict[str, Any]]:
+    """Obtiene todas las observaciones del periodo para calculos internos."""
+    query = {"fecha": {"$gte": start_date, "$lte": end_date}}
+    try:
+        return list(database.observaciones.find(query).sort(
+            [("serie_id", 1), ("fecha", 1), ("_id", 1)]
+        ))
+    except PyMongoError as error:
+        raise MongoDBError(f"No fue posible consultar todas las observaciones: {error}") from error
 
 
 def list_ingestion_logs(
