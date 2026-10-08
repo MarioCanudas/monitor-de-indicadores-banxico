@@ -152,6 +152,18 @@ uv run uvicorn backend.main:app --reload
 
 La documentación interactiva queda disponible en `/docs`. Las consultas de observaciones aceptan filtros por serie, fechas y paginación; las estadísticas aceptan agrupaciones por año, mes y año-mes; el historial de ejecuciones está disponible en `GET /ingestas/historial`.
 
+### Iniciar backend y frontend
+
+Con las dependencias del frontend instaladas en `frontend/`, puedes iniciar ambos
+servicios desde la raíz del proyecto con:
+
+```bash
+uv run poe run
+```
+
+El backend queda disponible en `http://localhost:8000` y el frontend en
+`http://localhost:8080`. La tarea `run` ejecuta ambos procesos en paralelo.
+
 ### Flujo completo de ejemplo
 
 ```bash
