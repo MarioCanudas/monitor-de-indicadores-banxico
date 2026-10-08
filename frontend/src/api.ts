@@ -14,6 +14,13 @@ type ApiObservation = Omit<Observation, 'id'> & { _id: string }
 type ApiObservationPage = Omit<ObservationPage, 'items'> & { items: ApiObservation[] }
 type ApiSnapshot = Omit<Snapshot, 'id'> & { _id: string }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 function normalizeId<T extends { _id: string }>(item: T): Omit<T, '_id'> & { id: string } {
   const { _id, ...rest } = item
   return { ...rest, id: _id }
@@ -31,7 +38,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { detail?: string } | null
-    throw new Error(body?.detail ?? `Error de API (${response.status})`)
+    throw new ApiError(body?.detail ?? `Error de API (${response.status})`, response.status)
   }
 
   return response.json() as Promise<T>
@@ -67,6 +74,11 @@ export const api = {
     request<ReportResponse>('/reportes/preview', {
       method: 'POST',
       body: JSON.stringify({ destinatario: email, start_date: start, end_date: end }),
+    }),
+  sendReport: (email: string, start: string, end: string) =>
+    request<ReportResponse>('/reportes/enviar', {
+      method: 'POST',
+      body: JSON.stringify({ destinatario: email, start_date: start, end_date: end, dry_run: false }),
     }),
 }
 

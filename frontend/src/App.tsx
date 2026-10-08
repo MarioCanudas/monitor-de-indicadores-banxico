@@ -20,7 +20,9 @@ import {
   Mail,
   Menu,
   RefreshCw,
+  Save,
   Search,
+  Send,
   Server,
   SlidersHorizontal,
   X,
@@ -34,7 +36,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { api } from './api'
+import { ApiError, api } from './api'
 import type { IngestionLog, Observation, ReportResponse, SeriesMetadata, Snapshot } from './types'
 
 type View = 'resumen' | 'series' | 'observaciones' | 'ejecuciones'
@@ -87,7 +89,9 @@ function App() {
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [search, setSearch] = useState('')
-  const [reportEmail, setReportEmail] = useState('')
+  const [savedRecipient, setSavedRecipient] = useState(() => window.localStorage.getItem('banxico-report-recipient') ?? '')
+  const [reportEmail, setReportEmail] = useState(() => window.localStorage.getItem('banxico-report-recipient') ?? '')
+  const [sendConfirmed, setSendConfirmed] = useState(false)
   const [report, setReport] = useState<ReportResponse | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
@@ -134,6 +138,19 @@ function App() {
   const latestSnapshot = snapshots[0]
   const totalAlerts = latestSnapshot?.alertas.length ?? 0
   const latestIngestion = history[0]
+  const reportMatchesCurrent = report?.snapshot_id === `${startDate}|${endDate}`
+    && report.destinatario === savedRecipient
+
+  function saveRecipient() {
+    const normalizedEmail = reportEmail.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return
+    window.localStorage.setItem('banxico-report-recipient', normalizedEmail)
+    setReportEmail(normalizedEmail)
+    setSavedRecipient(normalizedEmail)
+    setReport(null)
+    setSendConfirmed(false)
+    setNotice({ kind: 'success', text: 'Destinatario guardado en este navegador.' })
+  }
 
   async function runAction(action: 'ingest' | 'snapshot' | 'daily') {
     const labels = { ingest: 'ingesta', snapshot: 'snapshot', daily: 'tarea diaria' }
@@ -160,12 +177,41 @@ function App() {
 
   async function createReport(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (!savedRecipient || reportEmail.trim() !== savedRecipient) {
+      setNotice({ kind: 'error', text: 'Guarda el destinatario antes de generar la vista previa.' })
+      return
+    }
     setBusy('report')
     setNotice(null)
+    setSendConfirmed(false)
+    setReport(null)
     try {
-      setReport(await api.previewReport(reportEmail, startDate, endDate))
+      let preview: ReportResponse
+      try {
+        preview = await api.previewReport(reportEmail, startDate, endDate)
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 404) throw error
+        await api.createSnapshot(startDate, endDate)
+        preview = await api.previewReport(reportEmail, startDate, endDate)
+      }
+      setReport(preview)
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'No fue posible preparar el reporte.' })
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function sendReport() {
+    if (!report || !reportMatchesCurrent || !sendConfirmed || !report.dry_run) return
+    setBusy('send-report')
+    setNotice(null)
+    try {
+      const result = await api.sendReport(savedRecipient, startDate, endDate)
+      setReport(result)
+      setNotice({ kind: 'success', text: `Reporte enviado a ${result.destinatario}.` })
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'No fue posible enviar el reporte.' })
     } finally {
       setBusy('')
     }
@@ -339,9 +385,25 @@ function App() {
             </section>
 
             <section className="panel report-panel">
-              <div className="report-intro"><div className="report-icon"><Mail size={18} /></div><div><div className="section-kicker">DISTRIBUCIÓN</div><h2>Vista previa del reporte</h2><p>Prepara el correo del snapshot del periodo. No se enviará desde esta vista.</p></div></div>
-              <form className="report-form" onSubmit={(event) => void createReport(event)}><label htmlFor="report-email">Correo destinatario</label><div className="report-input-row"><input id="report-email" type="email" placeholder="nombre@empresa.com" value={reportEmail} onChange={(event) => setReportEmail(event.target.value)} required /><button className="button button-secondary" type="submit" disabled={Boolean(busy)}>{busy === 'report' ? <LoaderCircle className="spin" size={15} /> : <FileText size={15} />}Generar vista previa</button></div></form>
-              {report && <div className="report-result"><div className="report-result-head"><div><span>ASUNTO</span><strong>{report.asunto}</strong></div><button className="icon-button" title="Cerrar vista previa" onClick={() => setReport(null)}><X size={16} /></button></div><iframe title="Vista previa del reporte" sandbox="" srcDoc={report.html} /></div>}
+              <div className="report-intro"><div className="report-icon"><Mail size={18} /></div><div><div className="section-kicker">DISTRIBUCIÓN</div><h2>Reporte por correo</h2><p>Registra un destinatario, revisa el reporte y confirma el envío desde aquí.</p></div></div>
+              <form className="report-form" onSubmit={(event) => void createReport(event)}>
+                <label htmlFor="report-email">Correo destinatario</label>
+                <div className="report-input-row">
+                  <input id="report-email" type="email" placeholder="nombre@empresa.com" value={reportEmail} onChange={(event) => { setReportEmail(event.target.value); setSendConfirmed(false) }} required />
+                  <button className="button button-secondary" type="button" onClick={saveRecipient} disabled={Boolean(busy) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reportEmail.trim())}><Save size={15} />Guardar correo</button>
+                  <button className="button button-secondary" type="submit" disabled={Boolean(busy) || !savedRecipient || reportEmail.trim() !== savedRecipient}>{busy === 'report' ? <LoaderCircle className="spin" size={15} /> : <FileText size={15} />}Generar vista previa</button>
+                </div>
+                <p className="recipient-status">{savedRecipient ? `Guardado en este navegador: ${savedRecipient}` : 'El correo se guarda solo en este navegador.'}</p>
+              </form>
+              {report && <div className="report-result">
+                <div className="report-result-head"><div><span>ASUNTO</span><strong>{report.asunto}</strong></div><button className="icon-button" title="Cerrar vista previa" onClick={() => { setReport(null); setSendConfirmed(false) }}><X size={16} /></button></div>
+                <iframe title="Vista previa del reporte" sandbox="" srcDoc={report.html} />
+                <div className="report-send-bar">
+                  {report.dry_run ? <label className="send-confirm"><input type="checkbox" checked={sendConfirmed} onChange={(event) => setSendConfirmed(event.target.checked)} disabled={!reportMatchesCurrent || Boolean(busy)} /><span>Confirmo enviar este reporte a <strong>{report.destinatario}</strong>.</span></label> : <span className="sent-status"><Check size={15} /> Enviado a {report.destinatario}</span>}
+                  {report.dry_run && <button className="button button-primary" type="button" onClick={() => void sendReport()} disabled={!sendConfirmed || !reportMatchesCurrent || Boolean(busy)}>{busy === 'send-report' ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}{busy === 'send-report' ? 'Enviando…' : 'Enviar correo'}</button>}
+                  {!reportMatchesCurrent && report.dry_run && <span className="stale-report">El periodo o destinatario cambió. Genera una nueva vista previa.</span>}
+                </div>
+              </div>}
             </section>
           </>}
 
