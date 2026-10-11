@@ -228,15 +228,26 @@ def create_ingestion(
             earliest = get_earliest_observation(database, series_id)
         except MongoDBError as error:
             raise _service_error(error) from error
-        fetch_start: date | None = start_date
-        fetch_end: date | None = end_date
-        previous_value = None
+
+        earliest_date: date | None = None
+        latest_date: date | None = None
         if earliest and isinstance(earliest.get("fecha"), datetime):
-            if start_date < earliest["fecha"].date():
-                fetch_end = min(end_date, earliest["fecha"].date() - timedelta(days=1))
-            else:
-                fetch_start = None
-        if fetch_start is None or fetch_end is None or fetch_start > fetch_end:
+            earliest_date = earliest["fecha"].date()
+        if latest and isinstance(latest.get("fecha"), datetime):
+            latest_date = latest["fecha"].date()
+
+        gaps: list[tuple[date, date]] = []
+        if earliest_date is None or latest_date is None:
+            gaps.append((start_date, end_date))
+        else:
+            if start_date < earliest_date:
+                gaps.append((start_date, min(end_date, earliest_date - timedelta(days=1))))
+            if latest_date < end_date:
+                forward_start = max(start_date, latest_date + timedelta(days=1))
+                if forward_start <= end_date:
+                    gaps.append((forward_start, end_date))
+
+        if not gaps:
             series_log.append({
                 "serie_id": series_id,
                 "nuevos": 0,
@@ -246,42 +257,75 @@ def create_ingestion(
             })
             continue
 
-        try:
-            series_data = fetch_series([series_id], fetch_start, fetch_end)
-        except ConfigurationError as error:
-            raise _service_error(error) from error
-        except BanxicoError as error:
-            total_errors += 1
-            series_log.append({
-                "serie_id": series_id,
-                "nuevos": 0,
-                "duplicados": 0,
-                "consultada": True,
-                "error": str(error),
-            })
-            continue
-        series = cast(
-            dict[str, Any],
-            next((item for item in series_data if item.get("idSerie") == series_id), {}),
-        )
-        documents = parse_observations(series, run_id, previous_value)
+        stored_forward_value: float | None = None
+        if latest and isinstance(latest.get("valor"), (int, float)):
+            stored_forward_value = float(latest["valor"])
+
+        all_documents: list[dict[str, Any]] = []
         new_count = duplicate_count = 0
-        if documents:
+        gap_error: str | None = None
+        prev_backfill: float | None = None
+        prev_forward: float | None = stored_forward_value
+        for gap_start, gap_end in gaps:
+            is_forward = (
+                earliest_date is not None
+                and latest_date is not None
+                and gap_start > latest_date
+            )
+            base_value = prev_forward if is_forward else prev_backfill
+            # Sin histórico, el primer hueco encadena sobre lo ya descargado
+            # en esta misma ejecución.
+            if earliest_date is None or latest_date is None:
+                base_value = (
+                    float(all_documents[-1]["valor"]) if all_documents else None
+                )
             try:
-                new_count, duplicate_count = insert_observations(database, documents)
-                update_catalogo_latest(database, series_id, documents)
+                series_data = fetch_series([series_id], gap_start, gap_end)
+            except ConfigurationError as error:
+                raise _service_error(error) from error
+            except BanxicoError as error:
+                total_errors += 1
+                gap_error = str(error)
+                break
+            series = cast(
+                dict[str, Any],
+                next((item for item in series_data if item.get("idSerie") == series_id), {}),
+            )
+            documents = parse_observations(series, run_id, base_value)
+            if is_forward:
+                prev_forward = (
+                    float(documents[-1]["valor"]) if documents else prev_forward
+                )
+            else:
+                prev_backfill = (
+                    float(documents[-1]["valor"]) if documents else prev_backfill
+                )
+            if documents:
+                try:
+                    inserted, duplicates = insert_observations(database, documents)
+                    new_count += inserted
+                    duplicate_count += duplicates
+                    all_documents.extend(documents)
+                except MongoDBError as error:
+                    raise _service_error(error) from error
+        if all_documents:
+            try:
+                update_catalogo_latest(database, series_id, all_documents)
             except MongoDBError as error:
                 raise _service_error(error) from error
         total_new += new_count
         total_duplicates += duplicate_count
-        series_log.append({
+        entry: dict[str, Any] = {
             "serie_id": series_id,
             "nuevos": new_count,
             "duplicados": duplicate_count,
             "consultada": True,
-            "desde": fetch_start.isoformat(),
-            "hasta": fetch_end.isoformat(),
-        })
+            "desde": gaps[0][0].isoformat(),
+            "hasta": gaps[-1][1].isoformat(),
+        }
+        if gap_error is not None:
+            entry["error"] = gap_error
+        series_log.append(entry)
 
     duration = round(time.time() - started_at, 2)
     try:

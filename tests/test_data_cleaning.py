@@ -1,6 +1,6 @@
 import unittest
-from datetime import date
-from unittest.mock import patch
+from datetime import date, datetime
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from fastapi import HTTPException
@@ -72,6 +72,84 @@ class ObservationCleaningTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 422)
         get_database.assert_not_called()
+
+
+class IngestionGapsTests(unittest.TestCase):
+    def _run_ingestion(self, earliest, latest, start, end, fetch_payload=None):
+        calls = []
+        inserted = []
+
+        def fake_fetch(series_ids, gap_start, gap_end):
+            calls.append((gap_start, gap_end))
+            if fetch_payload is not None:
+                return fetch_payload
+            return [{
+                "idSerie": series_ids[0],
+                "datos": [{"fecha": gap_start.strftime("%d/%m/%Y"), "dato": "100"}],
+            }]
+
+        def fake_insert(_database, documents):
+            inserted.extend(documents)
+            return (len(documents), 0)
+
+        with patch("backend.main.get_database", return_value=MagicMock()), \
+            patch("backend.main.seed_catalogo"), \
+            patch("backend.main.get_latest_observation", return_value=latest), \
+            patch("backend.main.get_earliest_observation", return_value=earliest), \
+            patch("backend.main.fetch_series", side_effect=fake_fetch), \
+            patch("backend.main.insert_observations", side_effect=fake_insert), \
+            patch("backend.main.update_catalogo_latest"), \
+            patch("backend.main.save_ingestion_log"):
+            response = create_ingestion(start, end)
+        return response, calls, inserted
+
+    def test_ingestion_fetches_forward_gap_after_latest(self):
+        earliest = {"fecha": datetime(2024, 1, 1), "valor": 100.0}
+        latest = {"fecha": datetime(2024, 1, 10), "valor": 110.0}
+
+        response, calls, _ = self._run_ingestion(
+            earliest, latest, date(2024, 1, 1), date(2024, 1, 15)
+        )
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0], (date(2024, 1, 11), date(2024, 1, 15)))
+        first = response.series[0]
+        self.assertTrue(first.consultada)
+        self.assertEqual(first.desde, date(2024, 1, 11))
+        self.assertEqual(first.hasta, date(2024, 1, 15))
+
+    def test_ingestion_skips_when_range_is_already_stored(self):
+        earliest = {"fecha": datetime(2024, 1, 1), "valor": 100.0}
+        latest = {"fecha": datetime(2024, 1, 15), "valor": 110.0}
+
+        with patch("backend.main.get_database", return_value=MagicMock()), \
+            patch("backend.main.seed_catalogo"), \
+            patch("backend.main.get_latest_observation", return_value=latest), \
+            patch("backend.main.get_earliest_observation", return_value=earliest), \
+            patch("backend.main.fetch_series") as fetch_series, \
+            patch("backend.main.save_ingestion_log"):
+            response = create_ingestion(date(2024, 1, 5), date(2024, 1, 10))
+
+        fetch_series.assert_not_called()
+        first = response.series[0]
+        self.assertFalse(first.consultada)
+        self.assertEqual(first.motivo, "sin datos nuevos")
+
+    def test_ingestion_chains_forward_variation_with_stored_value(self):
+        earliest = {"fecha": datetime(2024, 1, 1), "valor": 100.0}
+        latest = {"fecha": datetime(2024, 1, 10), "valor": 110.0}
+        payload = [{
+            "idSerie": "SF43718",
+            "datos": [{"fecha": "12/01/2024", "dato": "121"}],
+        }]
+
+        _, _, inserted = self._run_ingestion(
+            earliest, latest, date(2024, 1, 1), date(2024, 1, 15),
+            fetch_payload=payload,
+        )
+
+        self.assertTrue(inserted)
+        self.assertEqual(inserted[0]["var_pct"], 10.0)
 
 
 if __name__ == "__main__":
