@@ -1,11 +1,17 @@
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.config import Settings
 from backend.llm_client import _narrative_input, generate_executive_summary
-from backend.reports import render_report, send_report, validate_recipient
+from backend.reports import (
+    REPORT_DISCLAIMER,
+    render_report,
+    send_report,
+    validate_recipient,
+)
 
 
 def settings_without_external_services() -> Settings:
@@ -76,6 +82,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Resumen diario · 2026-10-05", body)
         self.assertIn("<h2>Resumen</h2>", body)
         self.assertIn("Pesos por dólar, FIX: 18.2500 (+5.2000% en el periodo)", body)
+        self.assertIn(REPORT_DISCLAIMER, body)
         self.assertNotIn("<li>SF43718:", body)
 
     def test_executive_summary_replaces_series_ids_with_indicator_names(self):
@@ -99,6 +106,32 @@ class ReportTests(unittest.TestCase):
                 dry_run=True,
             )
         smtp.assert_not_called()
+
+    def test_sent_email_includes_report_and_disclaimer_in_plain_text(self):
+        subject, body = render_report(snapshot())
+        settings = replace(
+            settings_without_external_services(),
+            gmail_user="remitente@example.com",
+            gmail_key="app-password",
+        )
+
+        with patch("backend.reports.smtplib.SMTP_SSL") as smtp:
+            send_report(
+                "destino@example.com",
+                subject,
+                body,
+                settings,
+                dry_run=False,
+            )
+
+        message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+        parts = {
+            part.get_content_type(): part.get_content()
+            for part in message.iter_parts()
+        }
+        self.assertIn(REPORT_DISCLAIMER, parts["text/plain"])
+        self.assertIn("Monitor de indicadores Banxico", parts["text/plain"])
+        self.assertIn(REPORT_DISCLAIMER, parts["text/html"])
 
     def test_missing_llm_configuration_uses_deterministic_fallback(self):
         result = generate_executive_summary(snapshot(), settings_without_external_services())

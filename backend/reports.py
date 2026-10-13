@@ -4,6 +4,7 @@ import html
 import re
 import smtplib
 from email.message import EmailMessage
+from html.parser import HTMLParser
 from typing import Any
 
 from .banxico_client import INDICATOR_CONTEXT, SERIES_BY_ID
@@ -13,6 +14,32 @@ from .schemas import ExecutiveSummary
 
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+REPORT_DISCLAIMER = "Generado con IA. No es asesoría financiera"
+
+
+class _PlainTextReportParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"article", "br", "div", "h1", "h2", "h3", "li", "main", "p"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"article", "div", "h1", "h2", "h3", "li", "main", "p"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def _plain_text_report(body: str) -> str:
+    parser = _PlainTextReportParser()
+    parser.feed(body)
+    return "\n".join(
+        line.strip() for line in "".join(parser.parts).splitlines() if line.strip()
+    )
 
 
 def validate_recipient(recipient: str) -> str:
@@ -184,6 +211,7 @@ padding:32px;box-shadow:0 8px 28px #17365d1f">
 <p style="color:#61738d;font-size:14px">Una guía breve para entender qué mide cada indicador y cómo interpretar su valor.</p>
 {indicators}
 <h2>Alertas</h2><ul>{alerts or '<li>No se detectaron alertas.</li>'}</ul>
+<p style="margin-top:24px;padding-top:12px;border-top:1px solid #e7edf5;color:#718096;font-size:12px;text-align:center">{REPORT_DISCLAIMER}</p>
 </main></body></html>"""
     return subject, body
 
@@ -204,7 +232,7 @@ def send_report(
         message["Subject"] = subject
         message["From"] = sender
         message["To"] = recipient
-        message.set_content("Este reporte requiere un cliente con HTML habilitado.")
+        message.set_content(_plain_text_report(body))
         message.add_alternative(body, subtype="html")
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
