@@ -1,5 +1,185 @@
 # monitor-de-indicadores-banxico
 
+## Cómo ejecutar el proyecto
+
+Esta sección explica cómo preparar y ejecutar el backend y el frontend desde
+cero. Los comandos deben ejecutarse desde la carpeta raíz del proyecto
+(`monitor-de-indicadores-banxico`).
+
+### Requisitos previos
+
+Instala las siguientes herramientas antes de comenzar:
+
+- **Python 3.14 o superior** para el backend. La versión mínima está definida
+  en `pyproject.toml`.
+- **Node.js y npm** para el frontend. Usa Node.js 18 o superior; se recomienda
+  una versión LTS reciente.
+- **MongoDB** accesible mediante una URI válida. Es necesario para consultar o
+  guardar observaciones, ingestas y snapshots.
+- **Git**, si vas a clonar o actualizar el proyecto.
+- Un **token de Banxico** para las operaciones que consultan el SIE. Las rutas
+  de salud y algunas consultas que no acceden a Banxico pueden funcionar sin
+  este token.
+
+Puedes comprobar que Python, Node.js y npm están disponibles con:
+
+```bash
+python --version
+node --version
+npm --version
+```
+
+En algunos equipos el comando de Python es `python3` en lugar de `python`.
+Cuando sea así, sustituye `python` por `python3` en los comandos de esta guía.
+
+### 1. Obtener el proyecto y entrar a su carpeta
+
+Si todavía no tienes una copia local:
+
+```bash
+git clone https://github.com/MarioCanudas/monitor-de-indicadores-banxico.git
+cd monitor-de-indicadores-banxico
+```
+
+Si ya tienes el proyecto, únicamente entra a la carpeta raíz:
+
+```bash
+cd monitor-de-indicadores-banxico
+```
+
+### 2. Instalar las dependencias de Python
+
+#### Opción recomendada: `uv`
+
+`uv` crea y administra el entorno virtual a partir de `pyproject.toml` y
+`uv.lock`, por lo que instala las dependencias exactas del proyecto,
+incluidas las herramientas de desarrollo necesarias para la tarea que inicia
+ambos servicios.
+
+Instala `uv` siguiendo su documentación oficial y después ejecuta:
+
+```bash
+uv sync
+```
+
+Si quieres comprobar que el entorno quedó listo:
+
+```bash
+uv run python --version
+uv run poe --help
+```
+
+#### Opción alternativa: `pip`
+
+Si no tienes `uv`, crea y activa un entorno virtual para no instalar las
+dependencias globalmente:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+En Windows PowerShell, activa el entorno con:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+La instalación con `pip` toma las dependencias de producción y las
+dependencias de desarrollo declaradas en `pyproject.toml`, entre ellas
+FastAPI, Uvicorn, PyMongo, pandas, Requests, OpenAI y `poethepoet`.
+
+### 3. Instalar las dependencias de JavaScript
+
+Desde la raíz del proyecto, ejecuta:
+
+```bash
+npm --prefix frontend install
+```
+
+Este comando instala las dependencias del frontend dentro de
+`frontend/node_modules`, entre ellas React, Vite, TypeScript, Recharts y
+Lucide React. Solo es necesario repetirlo cuando cambie
+`frontend/package.json` (o cuando quieras reconstruir `node_modules`).
+
+### 4. Configurar las variables de entorno
+
+El backend necesita un archivo `.env` en la raíz del proyecto. Como mínimo,
+configura `MONGODB_URI` y `BANXICO_API` para utilizar las operaciones que
+acceden a MongoDB y Banxico:
+
+```env
+MONGODB_URI=mongodb+srv://usuario:contraseña@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DATABASE=banxico_monitor
+BANXICO_API=token_de_banxico
+```
+
+Gmail y Azure OpenAI son opcionales: solo agrega sus variables si vas a
+enviar reportes o generar resúmenes con Azure OpenAI. No compartas ni
+confirmes estas credenciales en Git. La lista completa de variables y sus
+usos está en [Configuración del backend](#configuración-del-backend).
+
+### 5. Levantar backend y frontend al mismo tiempo
+
+Esta es la forma más sencilla de ejecutar todo el proyecto.
+
+Con `uv`:
+
+```bash
+uv run poe run
+```
+
+Con `pip`, después de activar `.venv`:
+
+```bash
+poe run
+```
+
+El comando anterior abre ambos servicios en paralelo:
+
+- **Backend (API):** <http://localhost:8000>
+- **Documentación interactiva de la API:** <http://localhost:8000/docs>
+- **Frontend:** <http://localhost:8080>
+
+Mantén abierta esa terminal mientras uses la aplicación. Para detener ambos
+servicios, presiona `Ctrl+C`.
+
+### 6. Levantar cada servicio por separado
+
+Si prefieres usar dos terminales, deja la primera ubicada en la raíz del
+proyecto y ejecuta el backend.
+
+Con `uv`:
+
+```bash
+uv run uvicorn backend.main:app --reload --port 8000
+```
+
+Con `pip` y el entorno virtual activado:
+
+```bash
+python -m uvicorn backend.main:app --reload --port 8000
+```
+
+En una segunda terminal, inicia el frontend desde cualquier ubicación con:
+
+```bash
+npm --prefix /ruta/al/proyecto/monitor-de-indicadores-banxico run dev -- --host 0.0.0.0 --port 8080
+```
+
+Si la segunda terminal también está en la raíz del proyecto, puedes usar la
+forma corta:
+
+```bash
+npm --prefix frontend run dev -- --host 0.0.0.0 --port 8080
+```
+
+Cuando Vite muestre la dirección disponible, abre
+<http://localhost:8080> en el navegador. Las solicitudes del frontend se
+dirigen al backend en el puerto 8000.
+
 ## Guía rápida de Git y GitHub en VS Code
 
 Esta guía describe un flujo básico para trabajar con ramas desde la terminal integrada de VS Code. Abre la terminal con **Terminal > New Terminal**.
