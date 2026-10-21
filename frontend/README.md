@@ -21,7 +21,25 @@ Vite envía las solicitudes de `/api/*` al backend en `http://localhost:8000`. P
 
 ## Producción
 
-El build se genera con `npm run build`. El servidor que publique `dist/` debe enrutar `/api/*` al backend y quitar el prefijo `/api`; la configuración de proxy incluida solo aplica al servidor de desarrollo de Vite.
+El build se genera con `npm run build`. El servidor que publique `dist/` debe enrutar `/api/*` al backend y quitar el prefijo `/api`, o bien definir `VITE_API_URL` con la URL completa del backend para llamarlo directamente:
+
+```env
+VITE_API_URL=https://api.example.com
+# Opcional, si la documentación vive en otra ruta:
+VITE_API_DOCS_URL=https://api.example.com/docs
+```
+
+En ese caso el backend debe incluir el dominio del frontend en `CORS_ORIGINS`; de lo contrario el navegador bloqueará las peticiones. El proxy de Vite solo aplica al servidor de desarrollo.
+
+## Pantallas
+
+- **Resumen:** KPIs del indicador, gráfica histórica, alertas y acceso rápido al reporte.
+- **Series:** catálogo de indicadores configurados.
+- **Estadísticas:** estadística descriptiva y agrupaciones por año, mes o año-mes.
+- **Snapshots:** KPIs, alertas y análisis guardados por periodo.
+- **Observaciones:** histórico persistido, búsqueda y exportación CSV.
+- **Ejecuciones:** historial de ingestas y resultado por serie.
+- **Reportes:** vista previa, confirmación y envío por correo.
 
 ## Reportes por correo
 

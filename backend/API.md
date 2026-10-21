@@ -26,6 +26,17 @@ Devuelve el catálogo estático de series del paquete `mercados`. Cada elemento 
 
 Devuelve los metadatos de una serie concreta, por ejemplo `/series/SF43718`. Responde `404` si el identificador no pertenece al catálogo configurado.
 
+## `GET /kpis/{series_id}`
+
+Calcula los KPIs de una serie directamente en MongoDB con un aggregation
+pipeline (`$match`, `$sort`, `$group` y `$project`). Acepta `start_date` y
+`end_date` inclusivos. Devuelve `serie`, `periodo` y `kpi` con valor inicial y
+final, cambios absoluto y porcentual, mínimo y máximo con sus fechas, rango,
+promedio, mediana, desviación estándar, volatilidad diaria, días de alza/baja,
+mayores movimientos, tendencia, cobertura y, para TIIE, puntos porcentuales y
+puntos base. Responde `404` si la serie no existe, `422` si el rango es inválido
+y `503` si MongoDB no está disponible.
+
 ## `GET /observaciones`
 
 Consulta las observaciones almacenadas en `banxico_monitor.observaciones`, ordenadas de la más reciente a la más antigua. Parámetros opcionales: `series_id`, `start_date`, `end_date`, `skip` y `limit`. Las fechas son inclusivas; `limit` acepta valores entre `1` y `1000` (predeterminado `100`). La respuesta contiene `items` y `pagination` con `total`, `skip`, `limit` y `has_more`. Responde `404` si se solicita una serie inexistente, `422` si el rango no es válido y `503` si MongoDB no está configurado o no está disponible.
@@ -100,6 +111,14 @@ MongoDB usa el valor predeterminado de la aplicación. El análisis usa
 `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` y
 `AZURE_OPENAI_DEPLOYMENT`. Los reportes usan `GMAIL_USER` y `GMAIL_KEY`.
 La aplicación carga `.env` desde la raíz y no devuelve valores sensibles.
+
+El backend habilita CORS con `CORSMiddleware`. `CORS_ORIGINS` acepta una lista
+separada por comas y `CORS_ORIGIN_REGEX` permite orígenes dinámicos. Los valores
+predeterminados cubren el frontend local en `localhost:8080` y `localhost:5173`.
+
+Los índices se declaran en `backend/indexes.py` (8 básicos, 5 avanzados y 5
+creados desde Python). `python -m backend.indexes --explain --drop` compara
+`explain()` antes y después de crearlos; `--inventory` muestra el inventario.
 
 ## Prueba rápida
 

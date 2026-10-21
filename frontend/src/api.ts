@@ -1,18 +1,27 @@
 import type {
   IngestionLog,
   IngestionResponse,
+  Kpi,
   Observation,
   ObservationPage,
   ReportResponse,
   SeriesMetadata,
   Snapshot,
+  StatisticsResponse,
 } from './types'
 
-const API_ROOT = '/api'
+// En desarrollo se usa el proxy de Vite (/api). En producción se puede
+// apuntar directo al backend con VITE_API_URL, que ahora permite CORS.
+const API_ROOT = ((import.meta.env.VITE_API_URL as string | undefined) ?? '/api').replace(/\/$/, '')
+export const API_DOCS_URL = (import.meta.env.VITE_API_DOCS_URL as string | undefined)
+  ?? (API_ROOT.startsWith('http') ? `${API_ROOT.replace(/\/api$/, '')}/docs` : 'http://localhost:8000/docs')
+
 type ApiSeries = Omit<SeriesMetadata, 'id'> & { _id: string }
 type ApiObservation = Omit<Observation, 'id'> & { _id: string }
 type ApiObservationPage = Omit<ObservationPage, 'items'> & { items: ApiObservation[] }
 type ApiSnapshot = Omit<Snapshot, 'id'> & { _id: string }
+type ApiStatistics = Omit<StatisticsResponse, 'serie'> & { serie: ApiSeries }
+type ApiKpi = { serie: ApiSeries; periodo: { desde: string; hasta: string }; kpi: Kpi | null }
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -59,11 +68,23 @@ export const api = {
     const page = await request<ApiObservationPage>(`/observaciones?${queryString({ series_id: seriesId, start_date: start, end_date: end, limit: 1000 })}`)
     return { ...page, items: page.items.map(normalizeId) }
   },
-  snapshots: async () => {
-    const page = await request<{ items: ApiSnapshot[] }>('/snapshots?limit=8')
+  statistics: async (seriesId: string, start: string, end: string, grouping: string) => {
+    const data = await request<ApiStatistics>(
+      `/estadisticas/${seriesId}?${queryString({ start_date: start, end_date: end, agrupacion: grouping })}`,
+    )
+    return { ...data, serie: normalizeId(data.serie) }
+  },
+  kpis: async (seriesId: string, start: string, end: string) => {
+    const data = await request<ApiKpi>(
+      `/kpis/${seriesId}?${queryString({ start_date: start, end_date: end })}`,
+    )
+    return { ...data, serie: normalizeId(data.serie) }
+  },
+  snapshots: async (limit = 20) => {
+    const page = await request<{ items: ApiSnapshot[] }>(`/snapshots?limit=${limit}`)
     return { ...page, items: page.items.map(normalizeId) }
   },
-  history: () => request<{ items: IngestionLog[] }>('/ingestas/historial?limit=8'),
+  history: (limit = 20) => request<{ items: IngestionLog[] }>(`/ingestas/historial?limit=${limit}`),
   ingest: (start: string, end: string) =>
     request<IngestionResponse>(`/ingestas?${queryString({ start_date: start, end_date: end })}`, { method: 'POST' }),
   createSnapshot: (start: string, end: string) =>

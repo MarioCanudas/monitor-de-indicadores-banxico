@@ -311,6 +311,8 @@ BANXICO_API=token_de_banxico
 | `AZURE_OPENAI_ENDPOINT` | Solo para usar Azure OpenAI | URL base del recurso o proyecto de Azure OpenAI. Los endpoints de proyectos `*.services.ai.azure.com/api/projects/...` se conectan mediante la API compatible de OpenAI. | Sin valor |
 | `AZURE_OPENAI_DEPLOYMENT` | No | Nombre del deployment/modelo que se envía en `model` al generar el resumen. | `gpt-4.1-mini-ejercicio-openai` |
 | `BANXICO_API` | Sí para ingestas y estadísticas | Token de acceso al SIE de Banxico. Se envía en el encabezado `Bmx-Token`. | Sin valor; la operación falla si falta |
+| `CORS_ORIGINS` | No | Orígenes permitidos separados por coma, por ejemplo `https://monitor.example.com,http://localhost:8080`. El navegador bloquea las peticiones si el origen no está en la lista. | `http://localhost:8080`, `http://127.0.0.1:8080`, `http://localhost:5173` y `http://127.0.0.1:5173` |
+| `CORS_ORIGIN_REGEX` | No | Expresión regular opcional para orígenes dinámicos, por ejemplo `https://.*\.example\.com`. | Sin valor |
 
 `BANXICO_API` y `MONGODB_URI` son necesarias únicamente cuando se ejecutan
 rutas que acceden a esos servicios; por ejemplo, `/health` y `/series` no
@@ -330,7 +332,56 @@ Para iniciar la API:
 uv run uvicorn backend.main:app --reload
 ```
 
-La documentación interactiva queda disponible en `/docs`. Las consultas de observaciones aceptan filtros por serie, fechas y paginación; las estadísticas aceptan agrupaciones por año, mes y año-mes; el historial de ejecuciones está disponible en `GET /ingestas/historial`.
+La documentación interactiva queda disponible en `/docs`. Las consultas de observaciones aceptan filtros por serie, fechas y paginación; las estadísticas aceptan agrupaciones por año, mes y año-mes; los KPIs del periodo se consultan en `GET /kpis/{series_id}` y el historial de ejecuciones en `GET /ingestas/historial`.
+
+### CORS para el frontend
+
+El backend registra `CORSMiddleware` y permite por defecto los orígenes de
+desarrollo (`localhost:8080`, `127.0.0.1:8080`, `localhost:5173` y
+`127.0.0.1:5173`). En un despliegue real agrega el dominio público a
+`CORS_ORIGINS`:
+
+```env
+CORS_ORIGINS=https://monitor.example.com
+```
+
+El frontend usa `/api` con el proxy de Vite en desarrollo. Para producción,
+define `VITE_API_URL` con la URL completa del backend (por ejemplo
+`https://api.example.com`) y construye con `npm --prefix frontend run build`.
+Con CORS configurado, el navegador puede llamar la API aunque el frontend se
+sirva desde otro dominio.
+
+### Índices y diagnóstico de consultas
+
+La aplicación administra 18 índices declarados en `backend/indexes.py`:
+
+- **8 básicos:** filtros y ordenamientos de un solo campo.
+- **5 avanzados:** compuestos, únicos y de cobertura.
+- **5 desde Python:** agregaciones, alertas y consultas del monitor.
+
+`get_database()` los crea una sola vez por proceso. Para revisar el inventario
+y comparar planes de ejecución antes/después:
+
+```bash
+uv run python -m backend.indexes --inventory
+uv run python -m backend.indexes --explain
+uv run python -m backend.indexes --drop --explain
+```
+
+La opción `--drop` elimina únicamente los índices administrados (nunca `_id_`)
+para medir el plan sin índices. La salida muestra `totalDocsExamined`,
+`totalKeysExamined` y el índice elegido por cinco consultas representativas:
+última observación por serie, histórico por periodo, KPIs con `$match`/`$group`,
+snapshots recientes e historial de ingestas.
+
+### KPIs con aggregation pipeline
+
+`POST /snapshots` y `GET /kpis/{series_id}` calculan los KPIs con un
+aggregation pipeline real sobre `observaciones`: `$match` por fecha y serie,
+`$sort`, `$group` para colapsar fechas y agregar por serie, y `$project` para
+extremos, mediana, volatilidad, cobertura y cambios. Python solo recibe un
+documento agregado por serie; no descarga el histórico completo ni calcula los
+KPIs con pandas.
 
 ### Iniciar backend y frontend
 

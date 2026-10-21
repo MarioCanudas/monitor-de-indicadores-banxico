@@ -63,6 +63,12 @@ class StatisticsResponse(BaseModel):
     grupos: list[GroupedStatistics] = Field(default_factory=list)
 
 
+class KpiResponse(BaseModel):
+    serie: SeriesMetadata
+    periodo: DatePeriod
+    kpi: dict[str, Any] | None = None
+
+
 class IngestionSeriesResult(BaseModel):
     serie_id: str
     nuevos: int

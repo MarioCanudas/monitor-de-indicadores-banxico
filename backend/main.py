@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time as datetime_time, timedelta
 from typing import Annotated, Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException, Query, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from .banxico_client import (
     SERIES_BY_ID,
@@ -14,15 +15,15 @@ from .banxico_client import (
     fetch_series,
     parse_observations,
 )
-from .analytics import build_snapshot
+from .analytics import build_snapshot_from_metrics, business_days_between
 from .config import get_settings
 from .exceptions import BackendError, BanxicoError, ConfigurationError, MongoDBError
 from .llm_client import generate_executive_summary
 from .mongodb_client import (
+    aggregate_series_metrics,
     close_database,
     get_database,
     list_ingestion_logs,
-    list_all_observations,
     list_observations as query_observations,
     insert_observations,
     save_ingestion_log,
@@ -39,6 +40,7 @@ from .schemas import (
     IngestResponse,
     IngestionLog,
     IngestionLogPage,
+    KpiResponse,
     Observation,
     ObservationPage,
     Pagination,
@@ -69,6 +71,18 @@ app = FastAPI(
     description="API para consultar el catálogo e ingerir series del SIE de Banxico.",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# El frontend puede servirse desde otro origen (Vite en desarrollo o un CDN en
+# produccion). Sin CORS el navegador bloquearia las peticiones reales.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_origins),
+    allow_origin_regex=settings.cors_origin_regex,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["Content-Length", "Content-Type"],
 )
 
 
@@ -143,6 +157,37 @@ def get_series_statistics(
             GroupedStatistics.model_validate(item)
             for item in compute_grouped_statistics(observations, agrupacion)
         ],
+    )
+
+
+@app.get("/kpis/{series_id}", response_model=KpiResponse, tags=["Datos"])
+def get_series_kpis(
+    series_id: str,
+    start_date: Annotated[date, Query(description="Fecha inicial inclusiva.")] = settings.default_start_date,
+    end_date: Annotated[date, Query(description="Fecha final inclusiva.")] = DEFAULT_END_DATE,
+) -> KpiResponse:
+    """Calcula los KPIs de una serie con un aggregation pipeline en MongoDB."""
+    metadata = SERIES_BY_ID.get(series_id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail=f"Serie no encontrada: {series_id}")
+    if start_date > end_date:
+        raise HTTPException(status_code=422, detail="La fecha inicial debe ser anterior o igual a la fecha final.")
+    try:
+        database = get_database()
+        start_datetime, end_datetime = _date_bounds(start_date, end_date)
+        metrics = aggregate_series_metrics(
+            database,
+            start_datetime,
+            end_datetime,
+            business_days_between(start_date, end_date),
+            series_id=series_id,
+        )
+    except (BanxicoError, ConfigurationError, MongoDBError) as error:
+        raise _service_error(error) from error
+    return KpiResponse(
+        serie=SeriesMetadata.model_validate(metadata),
+        periodo=DatePeriod(desde=start_date, hasta=end_date),
+        kpi=metrics[0] if metrics else None,
     )
 
 
@@ -351,8 +396,13 @@ def create_snapshot(
     try:
         database = get_database()
         start_datetime, end_datetime = _date_bounds(start_date, end_date)
-        observations = list_all_observations(database, start_datetime, end_datetime)
-        snapshot = build_snapshot(observations, start_date, end_date, settings)
+        metrics = aggregate_series_metrics(
+            database,
+            start_datetime,
+            end_datetime,
+            business_days_between(start_date, end_date),
+        )
+        snapshot = build_snapshot_from_metrics(metrics, start_date, end_date, settings)
         snapshot["analisis"] = generate_executive_summary(snapshot, settings).model_dump()
         save_snapshot(database, snapshot)
         return Snapshot.model_validate(snapshot)

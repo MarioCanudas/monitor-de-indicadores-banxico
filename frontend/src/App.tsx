@@ -6,6 +6,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   BarChart3,
+  Calculator,
   CalendarDays,
   Check,
   ChevronDown,
@@ -16,6 +17,7 @@ import {
   ExternalLink,
   FileText,
   Gauge,
+  Layers,
   LoaderCircle,
   Mail,
   Menu,
@@ -36,38 +38,34 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ApiError, api } from './api'
+import { API_DOCS_URL, ApiError, api } from './api'
+import { daysAgo, number, seriesName, shortDate, today } from './format'
+import ReportsView from './components/ReportsView'
+import SnapshotsView from './components/SnapshotsView'
+import StatisticsView from './components/StatisticsView'
 import type { IngestionLog, Observation, ReportResponse, SeriesMetadata, Snapshot } from './types'
 
-type View = 'resumen' | 'series' | 'observaciones' | 'ejecuciones'
+type View = 'resumen' | 'series' | 'estadisticas' | 'snapshots' | 'observaciones' | 'ejecuciones' | 'reportes'
 type Notice = { kind: 'success' | 'error'; text: string }
 
 const viewOptions: { id: View; label: string; icon: typeof Gauge }[] = [
   { id: 'resumen', label: 'Resumen', icon: Gauge },
   { id: 'series', label: 'Series', icon: Activity },
+  { id: 'estadisticas', label: 'Estadísticas', icon: Calculator },
+  { id: 'snapshots', label: 'Snapshots', icon: Layers },
   { id: 'observaciones', label: 'Observaciones', icon: Database },
   { id: 'ejecuciones', label: 'Ejecuciones', icon: Clock3 },
+  { id: 'reportes', label: 'Reportes', icon: Mail },
 ]
 
-const today = () => new Date().toISOString().slice(0, 10)
-const daysAgo = (days: number) => {
-  const date = new Date()
-  date.setDate(date.getDate() - days)
-  return date.toISOString().slice(0, 10)
-}
-
-function shortDate(value: string | null | undefined) {
-  if (!value) return 'Sin fecha'
-  return new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(value))
-}
-
-function number(value: number | null | undefined, digits = 2) {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return new Intl.NumberFormat('es-MX', { maximumFractionDigits: digits, minimumFractionDigits: digits }).format(value)
-}
-
-function seriesName(series: SeriesMetadata[] | undefined, id: string) {
-  return series?.find((item) => item.id === id)?.titulo ?? id
+const viewDescriptions: Record<View, string> = {
+  resumen: 'Tipo de cambio y tasas de referencia, en una sola vista.',
+  series: 'Catálogo de indicadores configurados para el paquete mercados.',
+  estadisticas: 'Estadística descriptiva y agrupaciones por año, mes o año-mes.',
+  snapshots: 'KPIs, alertas y análisis guardados por periodo.',
+  observaciones: 'Histórico persistido en MongoDB, con filtros y exportación.',
+  ejecuciones: 'Historial incremental de ingestas y su resultado por serie.',
+  reportes: 'Vista previa, confirmación y envío seguro de reportes por correo.',
 }
 
 function ErrorState({ message }: { message: string }) {
@@ -118,8 +116,8 @@ function App() {
   }, [selectedId, startDate, endDate, refreshKey])
 
   useEffect(() => {
-    api.snapshots().then((response) => setSnapshots(response.items)).catch(() => setSnapshots([]))
-    api.history().then((response) => setHistory(response.items)).catch(() => setHistory([]))
+    api.snapshots(20).then((response) => setSnapshots(response.items)).catch(() => setSnapshots([]))
+    api.history(20).then((response) => setHistory(response.items)).catch(() => setHistory([]))
   }, [refreshKey])
 
   const selectedSeries = series.find((item) => item.id === selectedId)
@@ -234,6 +232,38 @@ function App() {
   const activeView = viewOptions.find((item) => item.id === view)!
   const title = view === 'resumen' ? 'Monitor de mercados' : activeView.label
 
+  const reportPanel = (
+    <section className="panel report-panel">
+      <div className="report-intro"><div className="report-icon"><Mail size={18} /></div><div><div className="section-kicker">DISTRIBUCIÓN</div><h2>Reporte por correo</h2><p>Registra un destinatario, revisa el reporte y confirma el envío desde aquí.</p></div></div>
+      <form className="report-form" onSubmit={(event) => void createReport(event)}>
+        <label htmlFor="report-email">Correo destinatario</label>
+        <div className="report-input-row">
+          <input id="report-email" type="email" placeholder="nombre@empresa.com" value={reportEmail} onChange={(event) => { setReportEmail(event.target.value); setSendConfirmed(false) }} required />
+          <button className="button button-secondary" type="button" onClick={saveRecipient} disabled={Boolean(busy) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reportEmail.trim())}><Save size={15} />Guardar correo</button>
+          <button className="button button-secondary" type="submit" disabled={Boolean(busy) || !savedRecipient || reportEmail.trim() !== savedRecipient}>{busy === 'report' ? <LoaderCircle className="spin" size={15} /> : <FileText size={15} />}Generar vista previa</button>
+        </div>
+        <p className="recipient-status">{savedRecipient ? `Guardado en este navegador: ${savedRecipient}` : 'El correo se guarda solo en este navegador.'}</p>
+      </form>
+      {report && <div className="report-result">
+        <div className="report-result-head"><div><span>ASUNTO</span><strong>{report.asunto}</strong></div><button className="icon-button" title="Cerrar vista previa" onClick={() => { setReport(null); setSendConfirmed(false) }}><X size={16} /></button></div>
+        <iframe title="Vista previa del reporte" sandbox="" srcDoc={report.html} />
+        <div className="report-send-bar">
+          {report.dry_run ? <label className="send-confirm"><input type="checkbox" checked={sendConfirmed} onChange={(event) => setSendConfirmed(event.target.checked)} disabled={!reportMatchesCurrent || Boolean(busy)} /><span>Confirmo enviar este reporte a <strong>{report.destinatario}</strong>.</span></label> : <span className="sent-status"><Check size={15} /> Enviado a {report.destinatario}</span>}
+          {report.dry_run && <button className="button button-primary" type="button" onClick={() => void sendReport()} disabled={!sendConfirmed || !reportMatchesCurrent || Boolean(busy)}>{busy === 'send-report' ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}{busy === 'send-report' ? 'Enviando…' : 'Enviar correo'}</button>}
+          {!reportMatchesCurrent && report.dry_run && <span className="stale-report">El periodo o destinatario cambió. Genera una nueva vista previa.</span>}
+        </div>
+      </div>}
+    </section>
+  )
+
+  function openReportPeriod(start: string, end: string) {
+    setStartDate(start.slice(0, 10))
+    setEndDate(end.slice(0, 10))
+    setReport(null)
+    setSendConfirmed(false)
+    setView('reportes')
+  }
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNavOpen ? 'sidebar-open' : ''}`}>
@@ -248,6 +278,7 @@ function App() {
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
               {id === 'series' && <span className="nav-count">{series.length}</span>}
+              {id === 'snapshots' && <span className="nav-count">{snapshots.length}</span>}
             </button>
           ))}
         </nav>
@@ -260,7 +291,7 @@ function App() {
         </div>
         <div className="sidebar-bottom">
           <div className="source-mark"><span>BM</span><div><strong>Banco de México</strong><small>Sistema de Información Económica</small></div></div>
-          <a className="docs-link" href="http://localhost:8000/docs" target="_blank" rel="noreferrer">Documentación API <ExternalLink size={13} /></a>
+          <a className="docs-link" href={API_DOCS_URL} target="_blank" rel="noreferrer">Documentación API <ExternalLink size={13} /></a>
         </div>
       </aside>
 
@@ -281,7 +312,7 @@ function App() {
             <div>
               <div className="eyebrow"><span className="eyebrow-line" />DATOS ECONÓMICOS · MÉXICO</div>
               <h1>{title}<span className="heading-period">.</span></h1>
-              <p className="heading-description">Tipo de cambio y tasas de referencia, en una sola vista.</p>
+              <p className="heading-description">{viewDescriptions[view]}</p>
             </div>
             <div className="heading-actions">
               <button className="button button-secondary" onClick={() => void runAction('ingest')} disabled={Boolean(busy)}>
@@ -384,27 +415,7 @@ function App() {
               </article>
             </section>
 
-            <section className="panel report-panel">
-              <div className="report-intro"><div className="report-icon"><Mail size={18} /></div><div><div className="section-kicker">DISTRIBUCIÓN</div><h2>Reporte por correo</h2><p>Registra un destinatario, revisa el reporte y confirma el envío desde aquí.</p></div></div>
-              <form className="report-form" onSubmit={(event) => void createReport(event)}>
-                <label htmlFor="report-email">Correo destinatario</label>
-                <div className="report-input-row">
-                  <input id="report-email" type="email" placeholder="nombre@empresa.com" value={reportEmail} onChange={(event) => { setReportEmail(event.target.value); setSendConfirmed(false) }} required />
-                  <button className="button button-secondary" type="button" onClick={saveRecipient} disabled={Boolean(busy) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reportEmail.trim())}><Save size={15} />Guardar correo</button>
-                  <button className="button button-secondary" type="submit" disabled={Boolean(busy) || !savedRecipient || reportEmail.trim() !== savedRecipient}>{busy === 'report' ? <LoaderCircle className="spin" size={15} /> : <FileText size={15} />}Generar vista previa</button>
-                </div>
-                <p className="recipient-status">{savedRecipient ? `Guardado en este navegador: ${savedRecipient}` : 'El correo se guarda solo en este navegador.'}</p>
-              </form>
-              {report && <div className="report-result">
-                <div className="report-result-head"><div><span>ASUNTO</span><strong>{report.asunto}</strong></div><button className="icon-button" title="Cerrar vista previa" onClick={() => { setReport(null); setSendConfirmed(false) }}><X size={16} /></button></div>
-                <iframe title="Vista previa del reporte" sandbox="" srcDoc={report.html} />
-                <div className="report-send-bar">
-                  {report.dry_run ? <label className="send-confirm"><input type="checkbox" checked={sendConfirmed} onChange={(event) => setSendConfirmed(event.target.checked)} disabled={!reportMatchesCurrent || Boolean(busy)} /><span>Confirmo enviar este reporte a <strong>{report.destinatario}</strong>.</span></label> : <span className="sent-status"><Check size={15} /> Enviado a {report.destinatario}</span>}
-                  {report.dry_run && <button className="button button-primary" type="button" onClick={() => void sendReport()} disabled={!sendConfirmed || !reportMatchesCurrent || Boolean(busy)}>{busy === 'send-report' ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}{busy === 'send-report' ? 'Enviando…' : 'Enviar correo'}</button>}
-                  {!reportMatchesCurrent && report.dry_run && <span className="stale-report">El periodo o destinatario cambió. Genera una nueva vista previa.</span>}
-                </div>
-              </div>}
-            </section>
+            {reportPanel}
           </>}
 
           {view === 'series' && <section className="panel full-table-panel">
@@ -415,6 +426,35 @@ function App() {
             })}</tbody></table></div> : <div className="empty-state">{loadError || 'Conectando con el catálogo de series…'}</div>}
             <div className="catalog-foot"><span><span className="chart-dot" />Catálogo configurado para el paquete mercados</span><span>Fuente: Banco de México</span></div>
           </section>}
+
+          {view === 'estadisticas' && <StatisticsView
+            series={series}
+            selectedId={selectedId}
+            startDate={startDate}
+            endDate={endDate}
+            refreshKey={refreshKey}
+          />}
+
+          {view === 'snapshots' && <SnapshotsView
+            series={series}
+            snapshots={snapshots}
+            selectedId={selectedId}
+            busy={busy}
+            onCreateSnapshot={() => void runAction('snapshot')}
+            onRefresh={() => setRefreshKey((value) => value + 1)}
+            onOpenReport={openReportPeriod}
+          />}
+
+          {view === 'reportes' && <ReportsView
+            snapshots={snapshots}
+            startDate={startDate}
+            endDate={endDate}
+            selectedSeriesName={selectedSeries?.titulo ?? selectedId}
+            onUsePeriod={openReportPeriod}
+            onRefresh={() => setRefreshKey((value) => value + 1)}
+          >
+            {reportPanel}
+          </ReportsView>}
 
           {view === 'observaciones' && <section className="panel full-table-panel">
             <div className="panel-heading table-heading"><div><div className="section-kicker">HISTÓRICO ALMACENADO</div><h2>Observaciones</h2></div><button className="button button-secondary compact-button" onClick={exportObservations} disabled={!filteredObservations.length}><Download size={15} />Exportar CSV</button></div>

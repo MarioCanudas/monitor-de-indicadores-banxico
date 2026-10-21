@@ -13,6 +13,25 @@ from .exceptions import ConfigurationError
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
+def _cors_origins() -> tuple[str, ...]:
+    """Lee CORS_ORIGINS como lista separada por comas."""
+    raw = os.getenv("CORS_ORIGINS", "")
+    origins = tuple(
+        origin.strip().rstrip("/")
+        for origin in raw.split(",")
+        if origin.strip()
+    )
+    return origins or DEFAULT_CORS_ORIGINS
+
+
 @dataclass(frozen=True)
 class Settings:
     banxico_api: str | None
@@ -29,6 +48,8 @@ class Settings:
     azure_openai_api_version: str
     gmail_user: str | None
     gmail_key: str | None
+    cors_origins: tuple[str, ...] = DEFAULT_CORS_ORIGINS
+    cors_origin_regex: str | None = None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -53,6 +74,8 @@ class Settings:
             ),
             gmail_user=os.getenv("GMAIL_USER") or os.getenv("GMAIL_EMAIL"),
             gmail_key=os.getenv("GMAIL_KEY"),
+            cors_origins=_cors_origins(),
+            cors_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None,
         )
 
     def require_banxico_api(self) -> str:
